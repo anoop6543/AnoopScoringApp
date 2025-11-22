@@ -1,0 +1,5 @@
+{
+  "name": "ScoreMaster AI",
+  "description": "A universal multi-player scorekeeper with undo history, rule assistant AI, and cross-platform mobile support.",
+  "requestFramePermissions": []
+}
