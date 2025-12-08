@@ -1,17 +1,20 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Player, AppView } from './types';
+import React, { useState, useEffect } from 'react';
+import { Player, AppView, UserProfile, GameSession } from './types';
 import { PlayerCard } from './components/PlayerCard';
 import { RuleAssistant } from './components/RuleAssistant';
+import { WelcomeScreen } from './components/WelcomeScreen';
+import { Dashboard } from './components/Dashboard';
+import { storageService } from './services/storageService';
 import { 
-  Users, 
   RotateCcw, 
   History, 
   Trophy, 
   PlusCircle, 
   Trash2, 
-  Settings, 
   Bot,
-  ArrowLeft
+  ArrowLeft,
+  Save,
+  Cloud
 } from 'lucide-react';
 
 // Pre-defined pleasing colors for players
@@ -27,36 +30,118 @@ const PLAYER_COLORS = [
 ];
 
 const App: React.FC = () => {
-  // State
-  const [view, setView] = useState<AppView>(AppView.SETUP);
+  // Global App State
+  const [view, setView] = useState<AppView>(AppView.WELCOME);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [sessions, setSessions] = useState<GameSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+
+  // Active Game State
   const [players, setPlayers] = useState<Player[]>([]);
   const [gameName, setGameName] = useState<string>('Game Night');
-  // History is a stack of Player arrays. history[history.length - 1] is the *previous* state.
   const [history, setHistory] = useState<Player[][]>([]);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
   
-  // Setup State
+  // Setup View State
   const [newPlayerName, setNewPlayerName] = useState('');
 
-  // Initial Load
+  // Initialization: Check for active login on mount
   useEffect(() => {
-    // Add default players for quick start
-    if (players.length === 0) {
-      setPlayers([
-        { id: '1', name: 'Player 1', score: 0, color: PLAYER_COLORS[0] },
-        { id: '2', name: 'Player 2', score: 0, color: PLAYER_COLORS[1] },
-      ]);
+    const savedUser = storageService.getCurrentUser();
+    if (savedUser) {
+      setCurrentUser(savedUser);
+      setSessions(storageService.getUserSessions(savedUser.id));
+      setView(AppView.DASHBOARD);
+    } else {
+      setView(AppView.WELCOME);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --- Actions ---
+  // --- Auto-Save Mechanism ---
+  useEffect(() => {
+    if (view === AppView.GAME && activeSessionId) {
+      const currentSession = sessions.find(s => s.id === activeSessionId);
+      
+      if (currentSession && currentUser) {
+        const updatedSession: GameSession = {
+          ...currentSession,
+          players,
+          history,
+          lastUpdated: Date.now(),
+          name: gameName,
+        };
+        storageService.saveSession(updatedSession);
+        
+        // Update local sessions state without triggering a re-render loop if possible
+        setSessions(prev => prev.map(s => s.id === activeSessionId ? updatedSession : s));
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [players, history, gameName]); 
+
+  // --- User / Session Actions ---
+
+  const handleLogin = async (name: string, email?: string) => {
+    if (email) {
+      // Cloud Login
+      const { user, isNew, restored } = await storageService.loginOrRegisterCloud(name, email);
+      setCurrentUser(user);
+      setSessions(storageService.getUserSessions(user.id));
+      
+      if (restored) {
+        // Automatically sync back to ensure timestamps align
+        await storageService.syncToCloud(user);
+      } else if (isNew) {
+         // New user
+      }
+    } else {
+      // Local Login
+      const { user } = storageService.loginOrRegisterLocal(name);
+      setCurrentUser(user);
+      setSessions(storageService.getUserSessions(user.id));
+    }
+    
+    setView(AppView.DASHBOARD);
+  };
+
+  const handleGuestAccess = () => {
+    setCurrentUser(null);
+    setSessions([]); // Guests don't see history
+    setupNewGame(); // Go straight to setup
+  };
+
+  const handleLogout = () => {
+    storageService.logout();
+    setCurrentUser(null);
+    setSessions([]);
+    setView(AppView.WELCOME);
+  };
+
+  const refreshSessions = () => {
+    if (currentUser) {
+        // Re-fetch user in case cloud sync updated the 'lastSynced' field
+        const updatedUser = storageService.getCurrentUser();
+        if (updatedUser) setCurrentUser(updatedUser);
+        setSessions(storageService.getUserSessions(currentUser.id));
+    }
+  };
+
+  const deleteSession = (id: string) => {
+    if (confirm("Delete this game session permanently?")) {
+      storageService.deleteSession(id);
+      if (currentUser) {
+          setSessions(storageService.getUserSessions(currentUser.id));
+      }
+    }
+  };
+
+  // --- Game Actions ---
 
   const addPlayer = (e?: React.FormEvent) => {
     e?.preventDefault();
     const name = newPlayerName.trim() || `Player ${players.length + 1}`;
     const newPlayer: Player = {
-      id: Date.now().toString(),
+      id: Date.now().toString() + Math.random().toString().slice(2, 5),
       name,
       score: 0,
       color: PLAYER_COLORS[players.length % PLAYER_COLORS.length],
@@ -69,13 +154,52 @@ const App: React.FC = () => {
     setPlayers(players.filter(p => p.id !== id));
   };
 
-  const startGame = () => {
+  const startNewGame = () => {
+    const newSessionId = Date.now().toString();
+    
+    // Only save session if user is logged in
+    if (currentUser) {
+        const newSession: GameSession = {
+            id: newSessionId,
+            ownerId: currentUser.id,
+            name: gameName,
+            date: Date.now(),
+            lastUpdated: Date.now(),
+            players: players,
+            history: [],
+            isFinished: false,
+        };
+        storageService.saveSession(newSession);
+        setSessions(prev => [newSession, ...prev]);
+        setActiveSessionId(newSessionId);
+    } else {
+        // Guest mode
+        setActiveSessionId(newSessionId);
+    }
+
     setHistory([]);
     setView(AppView.GAME);
   };
 
+  const resumeSession = (session: GameSession) => {
+    setActiveSessionId(session.id);
+    setGameName(session.name);
+    setPlayers(session.players);
+    setHistory(session.history || []);
+    setView(AppView.GAME);
+  };
+
+  const setupNewGame = () => {
+    setGameName('Game Night');
+    setPlayers([
+      { id: '1', name: 'Player 1', score: 0, color: PLAYER_COLORS[0] },
+      { id: '2', name: 'Player 2', score: 0, color: PLAYER_COLORS[1] },
+    ]);
+    setActiveSessionId(null);
+    setView(AppView.SETUP);
+  };
+
   const saveToHistory = () => {
-    // Deep copy current players state to history
     const snapshot = JSON.parse(JSON.stringify(players));
     setHistory(prev => [...prev, snapshot]);
   };
@@ -95,7 +219,6 @@ const App: React.FC = () => {
   };
 
   const renamePlayer = (id: string, newName: string) => {
-    // We don't necessarily need history for renaming, but let's keep it for consistency
     setPlayers(prev => prev.map(p => 
       p.id === id ? { ...p, name: newName } : p
     ));
@@ -115,35 +238,68 @@ const App: React.FC = () => {
     }
   };
 
-  const endGame = () => {
-    if (confirm("End current game and go back to setup?")) {
-      setView(AppView.SETUP);
+  const handleBackNavigation = () => {
+    if (!currentUser) {
+      if (confirm("Exit game? As a guest, your progress will be lost.")) {
+        setView(AppView.WELCOME);
+      }
+    } else {
+      setView(AppView.DASHBOARD);
     }
   };
 
-  // --- Views ---
+  // --- Views Rendering ---
+
+  if (view === AppView.WELCOME) {
+    return (
+      <WelcomeScreen 
+        onLogin={handleLogin}
+        onGuestAccess={handleGuestAccess}
+      />
+    );
+  }
+
+  if (view === AppView.DASHBOARD && currentUser) {
+    return (
+      <Dashboard 
+        user={currentUser}
+        sessions={sessions}
+        onNewGame={setupNewGame}
+        onResumeGame={resumeSession}
+        onDeleteSession={deleteSession}
+        onLogout={handleLogout}
+        onRefreshSessions={refreshSessions}
+      />
+    );
+  }
 
   if (view === AppView.SETUP) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 animate-in fade-in duration-500">
         <div className="w-full max-w-md space-y-8">
-          <div className="text-center space-y-2">
+          <div className="text-center space-y-2 relative">
+             <button 
+                onClick={() => currentUser ? setView(AppView.DASHBOARD) : setView(AppView.WELCOME)}
+                className="absolute left-0 top-1 p-2 text-slate-500 hover:text-white transition-colors"
+             >
+                <ArrowLeft size={24} />
+             </button>
             <div className="inline-flex items-center justify-center p-4 bg-indigo-500/10 rounded-full mb-4">
               <Trophy size={48} className="text-indigo-400" />
             </div>
-            <h1 className="text-4xl font-bold text-white tracking-tight">ScoreMaster AI</h1>
-            <p className="text-slate-400">Setup your game and players</p>
+            <h1 className="text-4xl font-bold text-white tracking-tight">Setup Game</h1>
+            <p className="text-slate-400">Add players and give your session a name</p>
           </div>
 
           <div className="bg-slate-900 rounded-2xl p-6 border border-slate-800 space-y-6 shadow-xl">
             <div>
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Game Name</label>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Session Name</label>
               <input 
                 type="text" 
                 value={gameName}
                 onChange={(e) => setGameName(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
-                placeholder="e.g. Catan, Basketball..."
+                placeholder="e.g. Catan Night, Friday Poker..."
               />
             </div>
 
@@ -176,7 +332,7 @@ const App: React.FC = () => {
             </div>
 
             <button 
-              onClick={startGame}
+              onClick={startNewGame}
               disabled={players.length === 0}
               className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-4 rounded-xl transition-all active:scale-[0.98] shadow-lg shadow-indigo-500/20"
             >
@@ -194,10 +350,18 @@ const App: React.FC = () => {
       {/* Top Bar */}
       <header className="flex-none bg-slate-900 border-b border-slate-800 p-4 z-10 flex items-center justify-between shadow-md">
         <div className="flex items-center gap-3">
-            <button onClick={endGame} className="p-2 bg-slate-800 rounded-lg hover:bg-slate-700 text-slate-300">
+            <button onClick={handleBackNavigation} className="p-2 bg-slate-800 rounded-lg hover:bg-slate-700 text-slate-300 transition-colors">
                 <ArrowLeft size={20} />
             </button>
-            <h1 className="font-bold text-lg md:text-xl truncate max-w-[150px] md:max-w-xs">{gameName}</h1>
+            <div>
+              <h1 className="font-bold text-lg md:text-xl truncate max-w-[150px] md:max-w-xs leading-tight">{gameName}</h1>
+              {currentUser && (
+                  <span className="text-xs text-slate-400 flex items-center gap-1">
+                      {currentUser.email ? <Cloud size={10} className="text-indigo-400"/> : <Save size={10} className="text-emerald-400"/>}
+                      {currentUser.email ? 'Cloud Active' : 'Auto-saving'}
+                  </span>
+              )}
+            </div>
         </div>
         
         <div className="flex items-center gap-2">

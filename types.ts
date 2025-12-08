@@ -8,7 +8,7 @@ export interface Player {
 export interface GameState {
   players: Player[];
   gameName: string;
-  history: Player[][]; // Stack of player states
+  history: Player[][];
 }
 
 export interface RuleResponse {
@@ -16,7 +16,28 @@ export interface RuleResponse {
   source?: string;
 }
 
+export interface UserProfile {
+  id: string;
+  username: string;
+  email?: string; // Optional for guest/offline, required for cloud
+  createdAt: number;
+  lastSynced?: number; // Timestamp of last successful cloud sync
+}
+
+export interface GameSession {
+  id: string;
+  ownerId: string; // ID of the user who owns this session
+  name: string;
+  date: number;
+  lastUpdated: number;
+  players: Player[];
+  history: Player[][];
+  isFinished: boolean;
+}
+
 export enum AppView {
+  WELCOME = 'WELCOME',
+  DASHBOARD = 'DASHBOARD',
   SETUP = 'SETUP',
   GAME = 'GAME',
 }
